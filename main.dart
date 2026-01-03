@@ -10,11 +10,9 @@ import 'package:http/http.dart' as http;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
-//위젯 기능을 위한 패키지
-import 'package:home_widget/home_widget.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-const String kBaseUrl = "https://knue-meal-backend.onrender.com";
+// [수정 1] API 주소 변경
+const String kBaseUrl = "https://knue-meal-api.onrender.com";
 
 // 전역 테마 상태 관리
 final ValueNotifier<Color> themeColor = ValueNotifier<Color>(
@@ -46,7 +44,7 @@ const List<Color> kColorPalette = [
 ];
 
 // -----------------------------------------------------------------------------
-// 알람 서비스 클래스 (Windows 렉 방지 수정됨)
+// 알람 서비스 클래스
 // -----------------------------------------------------------------------------
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
@@ -59,11 +57,7 @@ class NotificationService {
   bool _isInitialized = false;
 
   Future<void> init() async {
-    // [중요 수정] Windows 등 모바일이 아니면 아예 초기화를 하지 않음 (렉 방지)
-    if (!Platform.isAndroid && !Platform.isIOS && !Platform.isMacOS) {
-      return;
-    }
-
+    if (!Platform.isAndroid && !Platform.isIOS && !Platform.isMacOS) return;
     if (_isInitialized) return;
 
     try {
@@ -98,7 +92,6 @@ class NotificationService {
   }
 
   Future<void> requestPermissions() async {
-    // Windows에서는 실행 안 함
     if (!Platform.isAndroid && !Platform.isIOS) return;
 
     if (Platform.isIOS) {
@@ -124,8 +117,6 @@ class NotificationService {
     required DateTime scheduledTime,
   }) async {
     if (scheduledTime.isBefore(DateTime.now())) return;
-
-    // Windows에서는 실행 안 함
     if (!Platform.isAndroid && !Platform.isIOS && !Platform.isMacOS) return;
 
     try {
@@ -167,13 +158,10 @@ class NotificationService {
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 화면 세로 고정 (모바일용)
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
-  ]).catchError((e) {
-    // Windows에서는 회전 고정이 지원되지 않으므로 에러 무시
-  });
+  ]).catchError((e) {});
 
   runApp(const MealApp());
 }
@@ -191,16 +179,39 @@ class MealApp extends StatelessWidget {
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             useMaterial3: true,
-            // [색상 적용 최적화]
+            // [수정 3] 폰트 및 타이포그래피 개선
+            // 시스템 폰트를 우선하되, 한국어 폰트가 잘 보이도록 Fallback 설정
+            fontFamilyFallback: const [
+              'Pretendard',
+              'Apple SD Gothic Neo',
+              'Noto Sans KR',
+              'Malgun Gothic',
+              'sans-serif',
+            ],
             colorScheme: ColorScheme.fromSeed(
               seedColor: color,
               primary: color,
               brightness: Brightness.light,
+              surface: const Color(0xFFF8F9FA),
             ),
-            scaffoldBackgroundColor: const Color(0xFFF7F7FB),
+            scaffoldBackgroundColor: const Color(0xFFF8F9FA),
             appBarTheme: AppBarTheme(
               backgroundColor: color,
               foregroundColor: Colors.white,
+              elevation: 0,
+            ),
+            // 전반적인 텍스트 스타일 개선 (자간 축소로 세련된 느낌)
+            textTheme: const TextTheme(
+              bodyMedium: TextStyle(letterSpacing: -0.3, fontSize: 15),
+              bodyLarge: TextStyle(letterSpacing: -0.3, fontSize: 16),
+              titleLarge: TextStyle(
+                letterSpacing: -0.5,
+                fontWeight: FontWeight.bold,
+              ),
+              titleMedium: TextStyle(
+                letterSpacing: -0.4,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
           home: const MealMainScreen(),
@@ -232,7 +243,6 @@ class _MealMainScreenState extends State<MealMainScreen> {
   @override
   void initState() {
     super.initState();
-    // 앱 시작 시 알림 서비스 초기화 시도 (Windows는 내부에서 무시됨)
     _initNotification();
   }
 
@@ -274,13 +284,25 @@ class _TodayMealPageState extends State<TodayMealPage> {
     "lunch": [],
     "dinner": [],
   };
-  int _kcal = 0;
   int _reqId = 0;
 
   @override
   void initState() {
     super.initState();
+    _updateSelectionByTime();
     fetchMeals();
+  }
+
+  void _updateSelectionByTime() {
+    final now = DateTime.now();
+    final hour = now.hour;
+    if (hour < 9) {
+      _selected = MealType.breakfast;
+    } else if (hour < 14) {
+      _selected = MealType.lunch;
+    } else {
+      _selected = MealType.dinner;
+    }
   }
 
   Future<void> fetchMeals() async {
@@ -294,14 +316,11 @@ class _TodayMealPageState extends State<TodayMealPage> {
       final res = await _fetchMealApi(_date, _source);
       if (myReq != _reqId) return;
       _applyMealsFromBackend(res);
-      if (mounted)
-        setState(() {
-          _loading = false;
-        });
+      if (mounted) setState(() => _loading = false);
     } catch (e) {
       if (mounted && myReq == _reqId) {
         setState(() {
-          _error = e.toString();
+          _error = "식단 정보를 가져올 수 없습니다.";
           _loading = false;
           _meals = {"breakfast": [], "lunch": [], "dinner": []};
         });
@@ -313,51 +332,26 @@ class _TodayMealPageState extends State<TodayMealPage> {
     if (decoded is! Map) throw const FormatException("Invalid JSON");
     final meals = decoded["meals"];
     if (meals is! Map) throw const FormatException("Invalid response");
-
-    // 1. 데이터 파싱
     final bf = meals["조식"] ?? meals["아침"] ?? meals["breakfast"];
     final lu = meals["중식"] ?? meals["점심"] ?? meals["lunch"];
     final di = meals["석식"] ?? meals["저녁"] ?? meals["dinner"];
-
     _meals = {
       "breakfast": _asStringList(bf),
       "lunch": _asStringList(lu),
       "dinner": _asStringList(di),
     };
-    _kcal = int.tryParse("${decoded["kcal"] ?? 0}") ?? 0;
-
-    // 2. [수정됨] 위젯 업데이트 부분 (여기가 문제였습니다!)
-    // 4개의 재료를 모두 준비해서 넣어야 합니다.
-    if (Platform.isAndroid || Platform.isIOS) {
-      // 메뉴 리스트를 깔끔한 문자열로 변환 (메뉴1, 메뉴2...)
-      final bText = _meals['breakfast']?.isEmpty ?? true
-          ? "운영 없음"
-          : _meals['breakfast']!.join(", ");
-      final lText = _meals['lunch']?.isEmpty ?? true
-          ? "운영 없음"
-          : _meals['lunch']!.join(", ");
-      final dText = _meals['dinner']?.isEmpty ?? true
-          ? "운영 없음"
-          : _meals['dinner']!.join(", ");
-
-      // updateWidget 함수에 4개(제목, 아침, 점심, 저녁)를 꽉 채워 보냅니다.
-      WidgetService.updateWidget("오늘의 식단", bText, lText, dText);
-    }
   }
 
   void _changeDate(int deltaDays) {
     setState(() {
       _date = _date.add(Duration(days: deltaDays));
-      _selected = MealType.lunch;
     });
     fetchMeals();
   }
 
-  // 알람 토글 핸들러
   Future<void> _handleAlarmToggle() async {
-    // Windows 체크
     if (!Platform.isAndroid && !Platform.isIOS) {
-      _toast(context, "PC에서는 알람 기능이 지원되지 않습니다.");
+      _toast(context, "모바일 환경에서만 알람 설정이 가능합니다.");
       return;
     }
 
@@ -365,10 +359,8 @@ class _TodayMealPageState extends State<TodayMealPage> {
 
     if (_alarmOn) {
       await NotificationService().requestPermissions();
-
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
-
       int alarmId = 0;
       int count = 0;
 
@@ -376,7 +368,6 @@ class _TodayMealPageState extends State<TodayMealPage> {
         final times = type.timeRange.split("~");
         final startParts = times[0].trim().split(":");
         final endParts = times[1].trim().split(":");
-
         final start = DateTime(
           today.year,
           today.month,
@@ -399,17 +390,16 @@ class _TodayMealPageState extends State<TodayMealPage> {
           await NotificationService().scheduleAlarm(
             id: alarmId++,
             title: "🍱 ${type.label} 식사 준비",
-            body: "10분 뒤 식당 운영을 시작해요!",
+            body: "10분 뒤 식당 운영을 시작합니다!",
             scheduledTime: notifyStart,
           );
           count++;
         }
-
         if (notifyEnd.isAfter(now)) {
           await NotificationService().scheduleAlarm(
             id: alarmId++,
             title: "⏳ ${type.label} 마감 임박",
-            body: "10분 뒤 식당 운영이 마감돼요!",
+            body: "10분 뒤 식당 운영이 종료됩니다!",
             scheduledTime: notifyEnd,
           );
           count++;
@@ -426,18 +416,20 @@ class _TodayMealPageState extends State<TodayMealPage> {
       }
     } else {
       await NotificationService().cancelAll();
-      if (mounted) _toast(context, "모든 알람이 해제되었습니다.");
+      if (mounted) _toast(context, "알람이 해제되었습니다.");
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final isToday = _isSameDate(_date, DateTime.now());
+
     return _CommonMealLayout(
       header: _Header(
         alarmOn: _alarmOn,
         onToggleAlarm: _handleAlarmToggle,
         date: _date,
-        isToday: _isSameDate(_date, DateTime.now()),
+        isToday: isToday,
         onPrev: _loading ? null : () => _changeDate(-1),
         onNext: _loading ? null : () => _changeDate(1),
         source: _source,
@@ -447,36 +439,44 @@ class _TodayMealPageState extends State<TodayMealPage> {
                 setState(() => _source = s);
                 await fetchMeals();
               },
-        sourceHint: _source == MealSource.b
-            ? "B는 선택한 날짜의 요일(${_weekdayToDayParam(_date)}) 메뉴를 조회합니다."
-            : null,
       ),
       content: Column(
         children: [
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           _MealTabs(
             selected: _selected,
             onSelect: (t) => setState(() => _selected = t),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
+
           if (_loading)
-            const Padding(
-              padding: EdgeInsets.all(20),
-              child: CircularProgressIndicator(),
+            SizedBox(
+              height: 300,
+              child: Center(
+                child: CircularProgressIndicator(
+                  color: Theme.of(context).primaryColor,
+                ),
+              ),
             ),
+
           if (!_loading && _error != null) _ErrorCard(message: _error!),
-          if (!_loading)
-            _MealDetailCard(
-              status: _statusFor(_selected, DateTime.now(), _date),
-              type: _selected,
-              items: _meals[_selected.stdKey] ?? [],
-              kcal: _kcal,
-              onShare: () => _shareCopy(
-                context,
-                _date,
-                _source,
-                _selected,
-                _meals[_selected.stdKey],
+
+          if (!_loading && _error == null)
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 300),
+              child: _MealDetailCard(
+                key: ValueKey("$_date-$_selected-$_source"),
+                status: _statusFor(_selected, DateTime.now(), _date),
+                type: _selected,
+                items: _meals[_selected.stdKey] ?? [],
+                isToday: isToday,
+                onShare: () => _shareCopy(
+                  context,
+                  _date,
+                  _source,
+                  _selected,
+                  _meals[_selected.stdKey],
+                ),
               ),
             ),
         ],
@@ -500,7 +500,6 @@ class _MonthlyMealPageState extends State<MonthlyMealPage> {
   DateTime _selectedDate = DateTime.now();
   MealSource _source = MealSource.a;
   MealType _selectedType = MealType.lunch;
-
   bool _loading = false;
   String? _error;
   Map<String, List<String>> _meals = {
@@ -508,7 +507,6 @@ class _MonthlyMealPageState extends State<MonthlyMealPage> {
     "lunch": [],
     "dinner": [],
   };
-  int _kcal = 0;
 
   @override
   void initState() {
@@ -544,14 +542,11 @@ class _MonthlyMealPageState extends State<MonthlyMealPage> {
     try {
       final res = await _fetchMealApi(_selectedDate, _source);
       _applyMealsFromBackend(res);
-      if (mounted)
-        setState(() {
-          _loading = false;
-        });
+      if (mounted) setState(() => _loading = false);
     } catch (e) {
       if (mounted) {
         setState(() {
-          _error = e.toString();
+          _error = "정보 없음";
           _loading = false;
           _meals = {"breakfast": [], "lunch": [], "dinner": []};
         });
@@ -572,79 +567,81 @@ class _MonthlyMealPageState extends State<MonthlyMealPage> {
       "lunch": _asStringList(lu),
       "dinner": _asStringList(di),
     };
-    _kcal = int.tryParse("${decoded["kcal"] ?? 0}") ?? 0;
-    // [추가] 위젯 데이터 업데이트 (오늘 점심 메뉴 기준)
-    if (Platform.isAndroid || Platform.isIOS) {
-      // 메뉴 리스트를 깔끔한 문자열로 변환 (메뉴1, 메뉴2...)
-      final bText = _meals['breakfast']?.isEmpty ?? true
-          ? "운영 없음"
-          : _meals['breakfast']!.join(", ");
-      final lText = _meals['lunch']?.isEmpty ?? true
-          ? "운영 없음"
-          : _meals['lunch']!.join(", ");
-      final dText = _meals['dinner']?.isEmpty ?? true
-          ? "운영 없음"
-          : _meals['dinner']!.join(", ");
-
-      WidgetService.updateWidget("오늘의 식단", bText, lText, dText);
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
+    final isToday = _isSameDate(_selectedDate, DateTime.now());
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF7F7FB),
       appBar: AppBar(
         title: const Text(
           "월간 식단",
-          style: TextStyle(fontWeight: FontWeight.bold),
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
         ),
         centerTitle: false,
-        elevation: 0,
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: DropdownButton<MealSource>(
+              value: _source,
+              dropdownColor: Colors.white,
+              underline: const SizedBox(),
+              icon: const Icon(Icons.keyboard_arrow_down, color: Colors.white),
+              selectedItemBuilder: (context) {
+                return [
+                  const Center(
+                    child: Text(
+                      "기숙사",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const Center(
+                    child: Text(
+                      "학생회관",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ];
+              },
+              items: const [
+                DropdownMenuItem(value: MealSource.a, child: Text("기숙사 식당")),
+                DropdownMenuItem(value: MealSource.b, child: Text("학생회관 식당")),
+              ],
+              onChanged: (val) {
+                if (val != null) {
+                  setState(() => _source = val);
+                  _fetchForSelectedDate();
+                }
+              },
+            ),
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
             Container(
-              padding: const EdgeInsets.all(4),
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  _SourceBtn(
-                    label: "기숙사",
-                    isSel: _source == MealSource.a,
-                    onTap: () {
-                      setState(() => _source = MealSource.a);
-                      _fetchForSelectedDate();
-                    },
-                  ),
-                  _SourceBtn(
-                    label: "학생회관",
-                    isSel: _source == MealSource.b,
-                    onTap: () {
-                      setState(() => _source = MealSource.b);
-                      _fetchForSelectedDate();
-                    },
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    blurRadius: 20,
+                    color: Colors.black.withOpacity(0.05),
+                    offset: const Offset(0, 10),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20),
-                boxShadow: const [
-                  BoxShadow(blurRadius: 10, color: Color(0x0A000000)),
-                ],
-              ),
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(20),
               child: Column(
                 children: [
                   Row(
@@ -652,35 +649,54 @@ class _MonthlyMealPageState extends State<MonthlyMealPage> {
                     children: [
                       IconButton(
                         onPressed: () => _changeMonth(-1),
-                        icon: const Icon(Icons.chevron_left),
+                        icon: const Icon(
+                          Icons.chevron_left,
+                          color: Colors.grey,
+                        ),
                       ),
                       Text(
-                        "${_focusedMonth.year}년 ${_focusedMonth.month}월",
+                        "${_focusedMonth.year}.${_focusedMonth.month.toString().padLeft(2, '0')}",
                         style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.5,
                         ),
                       ),
                       IconButton(
                         onPressed: () => _changeMonth(1),
-                        icon: const Icon(Icons.chevron_right),
+                        icon: const Icon(
+                          Icons.chevron_right,
+                          color: Colors.grey,
+                        ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 16),
                   const Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
-                      Text("일", style: TextStyle(color: Colors.red)),
-                      Text("월"),
-                      Text("화"),
-                      Text("수"),
-                      Text("목"),
-                      Text("금"),
-                      Text("토", style: TextStyle(color: Colors.blue)),
+                      Text(
+                        "일",
+                        style: TextStyle(
+                          color: Colors.redAccent,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text("월", style: TextStyle(color: Colors.grey)),
+                      Text("화", style: TextStyle(color: Colors.grey)),
+                      Text("수", style: TextStyle(color: Colors.grey)),
+                      Text("목", style: TextStyle(color: Colors.grey)),
+                      Text("금", style: TextStyle(color: Colors.grey)),
+                      Text(
+                        "토",
+                        style: TextStyle(
+                          color: Colors.blueAccent,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ],
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 12),
                   _CalendarGrid(
                     focusedMonth: _focusedMonth,
                     selectedDate: _selectedDate,
@@ -690,18 +706,26 @@ class _MonthlyMealPageState extends State<MonthlyMealPage> {
                 ],
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
+
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    const Icon(
-                      Icons.restaurant_menu,
-                      size: 20,
-                      color: Colors.grey,
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: primary.withOpacity(0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.restaurant_menu,
+                        size: 20,
+                        color: primary,
+                      ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 10),
                     Text(
                       "${_selectedDate.month}월 ${_selectedDate.day}일 메뉴",
                       style: const TextStyle(
@@ -711,21 +735,22 @@ class _MonthlyMealPageState extends State<MonthlyMealPage> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 16),
                 _MealTabs(
                   selected: _selectedType,
                   onSelect: (t) => setState(() => _selectedType = t),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 16),
                 if (_loading)
                   const Center(
                     child: Padding(
                       padding: EdgeInsets.all(40),
                       child: CircularProgressIndicator(),
                     ),
-                  ),
-                if (!_loading && _error != null) _ErrorCard(message: _error!),
-                if (!_loading && _error == null)
+                  )
+                else if (_error != null)
+                  _ErrorCard(message: _error!)
+                else
                   _MealDetailCard(
                     status: _statusFor(
                       _selectedType,
@@ -734,7 +759,7 @@ class _MonthlyMealPageState extends State<MonthlyMealPage> {
                     ),
                     type: _selectedType,
                     items: _meals[_selectedType.stdKey] ?? [],
-                    kcal: _kcal,
+                    isToday: isToday,
                     onShare: () => _shareCopy(
                       context,
                       _selectedDate,
@@ -765,121 +790,772 @@ class SettingsPage extends StatelessWidget {
       valueListenable: themeColor,
       builder: (context, currentColor, child) {
         return Scaffold(
-          body: SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 20),
-                  const Text(
+          body: CustomScrollView(
+            slivers: [
+              SliverAppBar(
+                expandedHeight: 120,
+                floating: false,
+                pinned: true,
+                backgroundColor: currentColor,
+                flexibleSpace: FlexibleSpaceBar(
+                  title: const Text(
                     "설정",
-                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.w900),
+                    style: TextStyle(fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 30),
-                  const Text(
-                    "테마 설정",
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    width: double.infinity,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x0A000000),
-                          blurRadius: 20,
-                          offset: Offset(0, 10),
-                        ),
-                      ],
-                    ),
+                  centerTitle: false,
+                  titlePadding: const EdgeInsets.only(left: 20, bottom: 16),
+                  background: Container(color: currentColor),
+                ),
+              ),
+              SliverList(
+                delegate: SliverChildListDelegate([
+                  Padding(
                     padding: const EdgeInsets.all(20),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          children: [
-                            Icon(Icons.palette, size: 24, color: currentColor),
-                            const SizedBox(width: 10),
-                            const Text(
-                              "테마 색상 선택",
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 20),
-                        const Text("원하는 색상을 선택하세요."),
-                        const SizedBox(height: 20),
-                        Wrap(
-                          spacing: 12,
-                          runSpacing: 12,
-                          children: kColorPalette
-                              .map(
-                                (color) => _ColorPickerItem(
-                                  color: color,
-                                  isSelected: color.value == currentColor.value,
-                                ),
-                              )
-                              .toList(),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 40),
-                  const Text(
-                    "앱 정보",
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Column(
-                      children: [
-                        Icon(
-                          Icons.restaurant_menu,
-                          size: 40,
-                          color: Colors.grey.shade400,
-                        ),
-                        const SizedBox(height: 10),
                         const Text(
-                          "KNUE Meal App",
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          "Version 1.5.0 (Windows Fix)",
+                          "테마 색상",
                           style: TextStyle(
-                            color: Colors.grey.shade500,
-                            fontSize: 12,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
+                        const SizedBox(height: 16),
+                        Container(
+                          width: double.infinity,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.05),
+                                blurRadius: 10,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          padding: const EdgeInsets.all(20),
+                          child: Wrap(
+                            spacing: 16,
+                            runSpacing: 16,
+                            alignment: WrapAlignment.center,
+                            children: kColorPalette
+                                .map(
+                                  (color) => _ColorPickerItem(
+                                    color: color,
+                                    isSelected:
+                                        color.value == currentColor.value,
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ),
+                        const SizedBox(height: 32),
+                        const Text(
+                          "앱 정보",
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.05),
+                                blurRadius: 10,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            children: [
+                              Icon(
+                                Icons.restaurant,
+                                size: 48,
+                                color: currentColor.withOpacity(0.5),
+                              ),
+                              const SizedBox(height: 16),
+                              const Text(
+                                "KNUE Meal",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 18,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                "버전 2.4.0 (Info Update)",
+                                style: TextStyle(
+                                  color: Colors.grey.shade500,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 40),
                       ],
+                    ),
+                  ),
+                ]),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// UI 개선된 위젯들 (요청사항 반영됨)
+// -----------------------------------------------------------------------------
+
+class _Header extends StatelessWidget {
+  final bool alarmOn;
+  final VoidCallback onToggleAlarm;
+  final DateTime date;
+  final bool isToday;
+  final VoidCallback? onPrev;
+  final VoidCallback? onNext;
+  final MealSource source;
+  final ValueChanged<MealSource>? onSourceChanged;
+
+  const _Header({
+    required this.alarmOn,
+    required this.onToggleAlarm,
+    required this.date,
+    required this.isToday,
+    required this.onPrev,
+    required this.onNext,
+    required this.source,
+    required this.onSourceChanged,
+  });
+
+  void _showCafeteriaInfo(BuildContext context) {
+    // [수정 2] 식당 정보 업데이트
+    final isDorm = source == MealSource.a;
+    final location = isDorm ? "관리동 1층" : "학생회관 1층";
+    final price = isDorm ? "의무입사생 무료" : "5,000원 (일반)";
+    final operation = isDorm ? "연중무휴" : "주말/공휴일 휴무";
+
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).primaryColor.withOpacity(0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.storefront_rounded,
+                  size: 40,
+                  color: Theme.of(context).primaryColor,
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                "식당 운영 정보",
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 20),
+              _buildInfoRow(Icons.place, "위치", location),
+              const SizedBox(height: 12),
+              _buildInfoRow(Icons.attach_money, "가격", price),
+              const SizedBox(height: 12),
+              _buildInfoRow(Icons.access_time, "운영", operation),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Theme.of(context).primaryColor,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  child: const Text(
+                    "닫기",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(IconData icon, String label, String text) {
+    return Row(
+      children: [
+        Icon(icon, size: 20, color: Colors.grey),
+        const SizedBox(width: 12),
+        Text(
+          label,
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            color: Colors.grey,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(fontWeight: FontWeight.w500),
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = theme.colorScheme.primary;
+    const wd = ["일", "월", "화", "수", "목", "금", "토"];
+    final dayStr = "${date.month}월 ${date.day}일 ${wd[date.weekday % 7]}요일";
+
+    return Container(
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: const BorderRadius.only(
+          bottomLeft: Radius.circular(30),
+          bottomRight: Radius.circular(30),
+        ),
+        boxShadow: [
+          BoxShadow(
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+            color: color.withOpacity(0.4),
+          ),
+        ],
+      ),
+      padding: EdgeInsets.fromLTRB(
+        20,
+        MediaQuery.of(context).padding.top + 10,
+        20,
+        24,
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.place_rounded,
+                  color: Colors.white,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Row(
+                  children: [
+                    const Text(
+                      "KNUE 밥상",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        onTap: () => _showCafeteriaInfo(context),
+                        borderRadius: BorderRadius.circular(20),
+                        child: Padding(
+                          padding: const EdgeInsets.all(6.0),
+                          child: Icon(
+                            Icons.info_outline_rounded,
+                            color: Colors.white.withOpacity(0.7),
+                            size: 20,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: onToggleAlarm,
+                icon: Icon(
+                  alarmOn
+                      ? Icons.notifications_active
+                      : Icons.notifications_none,
+                  color: Colors.white.withOpacity(alarmOn ? 1.0 : 0.7),
+                ),
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.white.withOpacity(0.2),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                _buildSegmentBtn("기숙사", MealSource.a),
+                _buildSegmentBtn("학생회관", MealSource.b),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              IconButton(
+                onPressed: onPrev,
+                icon: const Icon(
+                  Icons.chevron_left,
+                  color: Colors.white,
+                  size: 28,
+                ),
+              ),
+              Column(
+                children: [
+                  if (isToday)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 4),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Text(
+                        "오늘의 식단",
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  Text(
+                    dayStr,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
                 ],
               ),
+              IconButton(
+                onPressed: onNext,
+                icon: const Icon(
+                  Icons.chevron_right,
+                  color: Colors.white,
+                  size: 28,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSegmentBtn(String title, MealSource val) {
+    final isSel = source == val;
+    return Expanded(
+      child: GestureDetector(
+        onTap: onSourceChanged == null ? null : () => onSourceChanged!(val),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: isSel ? Colors.white : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: isSel
+                ? [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 4,
+                    ),
+                  ]
+                : [],
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            title,
+            style: TextStyle(
+              color: isSel ? Colors.black87 : Colors.white.withOpacity(0.7),
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
             ),
           ),
-        );
-      },
+        ),
+      ),
+    );
+  }
+}
+
+class _MealDetailCard extends StatelessWidget {
+  final ServeStatus status;
+  final MealType type;
+  final List<String> items;
+  final bool isToday;
+  final VoidCallback onShare;
+
+  const _MealDetailCard({
+    super.key,
+    required this.status,
+    required this.type,
+    required this.items,
+    required this.isToday,
+    required this.onShare,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Color statusColor;
+    String statusText;
+    IconData statusIcon;
+
+    switch (status) {
+      case ServeStatus.open:
+        statusColor = const Color(0xFF2E7D32); // 진한 초록
+        statusText = "식당 운영 중";
+        statusIcon = Icons.soup_kitchen;
+        break;
+      case ServeStatus.waiting:
+        statusColor = const Color(0xFF1976D2); // 파랑
+        statusText = "식사 준비 중";
+        statusIcon = Icons.access_time;
+        break;
+      case ServeStatus.closed:
+        statusColor = Colors.grey.shade600;
+        statusText = "운영 종료";
+        statusIcon = Icons.block;
+        break;
+      case ServeStatus.notToday:
+        statusColor = Colors.grey.shade500;
+        statusText = "식당 운영시간 아님";
+        statusIcon = Icons.calendar_today_rounded;
+        break;
+    }
+
+    final bool unavailable =
+        items.isEmpty ||
+        items.first.contains("없음") ||
+        items.first.contains("미운영");
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: isToday
+            ? Border.all(
+                color: Theme.of(context).primaryColor.withOpacity(0.5),
+                width: 2,
+              )
+            : Border.all(color: Colors.transparent),
+        boxShadow: [
+          BoxShadow(
+            color: isToday
+                ? Theme.of(context).primaryColor.withOpacity(0.15)
+                : Colors.black.withOpacity(0.05),
+            blurRadius: 24,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            decoration: BoxDecoration(
+              color: isToday
+                  ? Theme.of(context).primaryColor.withOpacity(0.03)
+                  : Colors.transparent,
+              border: Border(bottom: BorderSide(color: Colors.grey.shade100)),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(24),
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: statusColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(statusIcon, size: 16, color: statusColor),
+                      const SizedBox(width: 6),
+                      Text(
+                        statusText,
+                        style: TextStyle(
+                          color: statusColor,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+
+                if (isToday)
+                  Container(
+                    margin: const EdgeInsets.only(right: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text(
+                      "TODAY",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+
+                Text(
+                  type.timeRange,
+                  style: const TextStyle(
+                    color: Colors.grey,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          Padding(
+            padding: const EdgeInsets.all(24),
+            child: unavailable
+                ? const Center(
+                    child: Column(
+                      children: [
+                        Icon(Icons.no_meals, size: 40, color: Colors.grey),
+                        SizedBox(height: 10),
+                        Text(
+                          "메뉴 정보가 없습니다.",
+                          style: TextStyle(
+                            color: Colors.grey,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (items.isNotEmpty) ...[
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Container(
+                              margin: const EdgeInsets.only(top: 4),
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).primaryColor,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                items.first,
+                                style: const TextStyle(
+                                  fontSize: 19,
+                                  fontWeight: FontWeight.w900,
+                                  height: 1.3,
+                                  letterSpacing: -0.5,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                      if (items.length > 1)
+                        ...items
+                            .sublist(1)
+                            .map(
+                              (menu) => Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Container(
+                                      margin: const EdgeInsets.only(top: 6),
+                                      width: 4,
+                                      height: 4,
+                                      decoration: const BoxDecoration(
+                                        color: Colors.grey,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 14),
+                                    Expanded(
+                                      child: Text(
+                                        menu,
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          color: Colors.grey.shade700,
+                                          height: 1.4,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            )
+                            .toList(),
+                    ],
+                  ),
+          ),
+
+          if (!unavailable)
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: const BoxDecoration(
+                color: Color(0xFFF8F9FA),
+                borderRadius: BorderRadius.vertical(
+                  bottom: Radius.circular(24),
+                ),
+              ),
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: onShare,
+                icon: const Icon(Icons.copy, size: 16),
+                label: const Text("메뉴 복사하기"),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.grey.shade700,
+                  backgroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: BorderSide(color: Colors.grey.shade300),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MealTabs extends StatelessWidget {
+  final MealType selected;
+  final ValueChanged<MealType> onSelect;
+  const _MealTabs({required this.selected, required this.onSelect});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        padding: const EdgeInsets.all(5),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.03),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          children: MealType.values.map((t) {
+            final isSel = t == selected;
+            final primary = Theme.of(context).colorScheme.primary;
+            return Expanded(
+              child: GestureDetector(
+                onTap: () => onSelect(t),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeOut,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  decoration: BoxDecoration(
+                    color: isSel
+                        ? primary.withOpacity(0.1)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        t.icon,
+                        size: 18,
+                        color: isSel ? primary : Colors.grey.shade400,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        t.label,
+                        style: TextStyle(
+                          color: isSel ? primary : Colors.grey.shade400,
+                          fontWeight: isSel ? FontWeight.w800 : FontWeight.w600,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ),
     );
   }
 }
@@ -895,155 +1571,133 @@ class _ColorPickerItem extends StatelessWidget {
       onTap: () => themeColor.value = color,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOutBack,
-        width: 45,
-        height: 45,
-        transform: isSelected
-            ? Matrix4.diagonal3Values(1.15, 1.15, 1.0)
-            : Matrix4.identity(),
+        width: 48,
+        height: 48,
         decoration: BoxDecoration(
           color: color,
           shape: BoxShape.circle,
-          border: isSelected
-              ? Border.all(color: Colors.white, width: 2)
-              : Border.all(color: Colors.grey.shade200, width: 1),
+          border: isSelected ? Border.all(color: Colors.white, width: 3) : null,
           boxShadow: isSelected
               ? [
                   BoxShadow(
-                    color: color.withOpacity(0.4),
-                    blurRadius: 8,
+                    color: color.withOpacity(0.5),
+                    blurRadius: 10,
                     spreadRadius: 2,
                   ),
                 ]
-              : null,
+              : [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 5,
+                  ),
+                ],
         ),
-        child: isSelected
-            ? const Icon(Icons.check, color: Colors.white, size: 24)
-            : null,
+        child: isSelected ? const Icon(Icons.check, color: Colors.white) : null,
       ),
     );
   }
 }
 
-// -----------------------------------------------------------------------------
-// Helper Classes & Widgets
-// -----------------------------------------------------------------------------
+class _BottomNavBar extends StatelessWidget {
+  final int currentIndex;
+  final ValueChanged<int> onTap;
+  const _BottomNavBar({required this.currentIndex, required this.onTap});
 
-Future<dynamic> _fetchMealApi(DateTime date, MealSource source) async {
-  late Uri uri;
-  if (source == MealSource.a) {
-    uri = Uri.parse(
-      "$kBaseUrl/meals-a?y=${date.year}&m=${date.month}&d=${date.day}",
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 20,
+            offset: const Offset(0, -5),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _buildNavItem(context, 0, Icons.restaurant, "오늘 식단"),
+              _buildNavItem(context, 1, Icons.calendar_month_rounded, "월간 식단"),
+              _buildNavItem(context, 2, Icons.settings_rounded, "설정"),
+            ],
+          ),
+        ),
+      ),
     );
-  } else {
-    uri = Uri.parse("$kBaseUrl/meals-b?day=${_weekdayToDayParam(date)}");
   }
-  final res = await http.get(uri).timeout(const Duration(seconds: 10));
-  if (res.statusCode != 200) throw Exception("HTTP ${res.statusCode}");
-  return jsonDecode(utf8.decode(res.bodyBytes));
-}
 
-String _weekdayToDayParam(DateTime d) {
-  switch (d.weekday) {
-    case 1:
-      return "mon";
-    case 2:
-      return "tue";
-    case 3:
-      return "wed";
-    case 4:
-      return "thu";
-    case 5:
-      return "fri";
-    case 6:
-      return "sat";
-    default:
-      return "sun";
+  Widget _buildNavItem(
+    BuildContext context,
+    int index,
+    IconData icon,
+    String label,
+  ) {
+    final isSel = index == currentIndex;
+    final primary = Theme.of(context).colorScheme.primary;
+    return InkWell(
+      onTap: () => onTap(index),
+      borderRadius: BorderRadius.circular(20),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        decoration: BoxDecoration(
+          color: isSel ? primary.withOpacity(0.1) : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: isSel ? primary : Colors.grey),
+            if (isSel) ...[
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: TextStyle(
+                  color: primary,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 }
 
-List<String> _asStringList(dynamic v) =>
-    (v is List) ? v.map((e) => e.toString()).toList() : [];
-bool _isSameDate(DateTime a, DateTime b) =>
-    a.year == b.year && a.month == b.month && a.day == b.day;
-
-ServeStatus _statusFor(MealType type, DateTime now, DateTime targetDate) {
-  if (!_isSameDate(now, targetDate)) return ServeStatus.waiting;
-  final range = type.timeRange.split("~").map((e) => e.trim()).toList();
-  final start = DateTime(
-    now.year,
-    now.month,
-    now.day,
-    int.parse(range[0].split(":")[0]),
-    int.parse(range[0].split(":")[1]),
-  );
-  final end = DateTime(
-    now.year,
-    now.month,
-    now.day,
-    int.parse(range[1].split(":")[0]),
-    int.parse(range[1].split(":")[1]),
-  );
-  if (now.isBefore(start)) return ServeStatus.waiting;
-  if (now.isAfter(end)) return ServeStatus.closed;
-  return ServeStatus.open;
-}
-
-void _toast(BuildContext context, String msg) {
-  ScaffoldMessenger.of(context).clearSnackBars();
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text(msg),
-      duration: const Duration(seconds: 1),
-      behavior: SnackBarBehavior.floating,
-      margin: const EdgeInsets.only(bottom: 80, left: 20, right: 20),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+class _ErrorCard extends StatelessWidget {
+  final String message;
+  const _ErrorCard({required this.message});
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.all(20),
+    padding: const EdgeInsets.all(20),
+    decoration: BoxDecoration(
+      color: const Color(0xFFFEF2F2),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: const Color(0xFFFECACA)),
+    ),
+    child: Column(
+      children: [
+        const Icon(Icons.error_outline_rounded, color: Colors.red, size: 40),
+        const SizedBox(height: 10),
+        Text(
+          message,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: Colors.red,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
     ),
   );
-}
-
-Future<void> _shareCopy(
-  BuildContext context,
-  DateTime date,
-  MealSource src,
-  MealType type,
-  List<String>? items,
-) async {
-  final text =
-      "[KNUE ${src == MealSource.a ? '기숙사' : '학생회관'} ${date.month}/${date.day} ${type.label}]\n${(items == null || items.isEmpty) ? '메뉴 없음' : items.join(', ')}";
-  await Clipboard.setData(ClipboardData(text: text));
-  if (context.mounted) _toast(context, "메뉴 복사 완료");
-}
-
-enum MealSource { a, b }
-
-enum MealType { breakfast, lunch, dinner }
-
-enum ServeStatus { open, waiting, closed }
-
-extension MealTypeX on MealType {
-  String get stdKey => toString().split('.').last;
-  String get label {
-    switch (this) {
-      case MealType.breakfast:
-        return "아침";
-      case MealType.lunch:
-        return "점심";
-      case MealType.dinner:
-        return "저녁";
-    }
-  }
-
-  String get timeRange {
-    switch (this) {
-      case MealType.breakfast:
-        return "07:30 ~ 09:00";
-      case MealType.lunch:
-        return "11:30 ~ 13:30";
-      case MealType.dinner:
-        return "17:30 ~ 19:00";
-    }
-  }
 }
 
 class _CalendarGrid extends StatelessWidget {
@@ -1077,8 +1731,8 @@ class _CalendarGrid extends StatelessWidget {
       physics: const NeverScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 7,
-        mainAxisSpacing: 8,
-        crossAxisSpacing: 8,
+        mainAxisSpacing: 10,
+        crossAxisSpacing: 10,
       ),
       itemCount: daysInMonth + offset,
       itemBuilder: (context, index) {
@@ -1088,18 +1742,20 @@ class _CalendarGrid extends StatelessWidget {
         final isSelected = _isSameDate(date, selectedDate);
         final isToday = _isSameDate(date, DateTime.now());
 
-        return InkWell(
+        return GestureDetector(
           onTap: () => onDateSelected(date),
-          borderRadius: BorderRadius.circular(99),
           child: Container(
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: isSelected
                   ? primaryColor
                   : (isToday
-                        ? primaryColor.withOpacity(0.2)
+                        ? primaryColor.withOpacity(0.1)
                         : Colors.transparent),
               shape: BoxShape.circle,
+              border: isToday && !isSelected
+                  ? Border.all(color: primaryColor)
+                  : null,
             ),
             child: Text(
               "$day",
@@ -1109,49 +1765,12 @@ class _CalendarGrid extends StatelessWidget {
                     : FontWeight.normal,
                 color: isSelected
                     ? Colors.white
-                    : (isToday ? primaryColor : Colors.black),
+                    : (isToday ? primaryColor : Colors.black87),
               ),
             ),
           ),
         );
       },
-    );
-  }
-}
-
-class _SourceBtn extends StatelessWidget {
-  final String label;
-  final bool isSel;
-  final VoidCallback onTap;
-  const _SourceBtn({
-    required this.label,
-    required this.isSel,
-    required this.onTap,
-  });
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: isSel
-                ? Theme.of(context).colorScheme.primary
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: isSel ? Colors.white : Colors.grey,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -1159,641 +1778,25 @@ class _SourceBtn extends StatelessWidget {
 class _CommonMealLayout extends StatelessWidget {
   final Widget header;
   final Widget content;
-  const _CommonMealLayout({required this.header, required this.content});
-  @override
-  Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Container(
-              decoration: const BoxDecoration(
-                color: Color(0xFFF7F7FB),
-                border: Border(
-                  left: BorderSide(color: Color(0xFFE5E7EB)),
-                  right: BorderSide(color: Color(0xFFE5E7EB)),
-                ),
-              ),
-              child: Column(
-                children: [
-                  header,
-                  Expanded(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
-                      child: content,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
 
-class _MealTabs extends StatelessWidget {
-  final MealType selected;
-  final ValueChanged<MealType> onSelect;
-  const _MealTabs({required this.selected, required this.onSelect});
-  @override
-  Widget build(BuildContext context) {
-    final primary = Theme.of(context).colorScheme.primary;
-    return Container(
-      padding: const EdgeInsets.all(6),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFF1F5F9)),
-        boxShadow: const [
-          BoxShadow(
-            blurRadius: 10,
-            offset: Offset(0, 4),
-            color: Color(0x11000000),
-          ),
-        ],
-      ),
-      child: Row(
-        children: MealType.values
-            .map(
-              (t) => Expanded(
-                child: InkWell(
-                  onTap: () => onSelect(t),
-                  borderRadius: BorderRadius.circular(12),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    decoration: BoxDecoration(
-                      color: t == selected
-                          ? primary.withOpacity(0.1)
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Center(
-                      child: Text(
-                        t.label,
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: t == selected
-                              ? FontWeight.w800
-                              : FontWeight.w600,
-                          color: t == selected
-                              ? primary
-                              : const Color(0xFF9CA3AF),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            )
-            .toList(),
-      ),
-    );
-  }
-}
-
-class _MealDetailCard extends StatelessWidget {
-  final ServeStatus status;
-  final MealType type;
-  final List<String> items;
-  final int kcal;
-  final VoidCallback onShare;
-  const _MealDetailCard({
-    required this.status,
-    required this.type,
-    required this.items,
-    required this.kcal,
-    required this.onShare,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    String statusLabel = "";
-    Color statusColor = Colors.grey;
-    Color statusBg = Colors.grey.shade100;
-    switch (status) {
-      case ServeStatus.open:
-        statusLabel = "식당 운영 중";
-        statusColor = const Color(0xFF15803D);
-        statusBg = const Color(0xFFEAF7EE);
-        break;
-      case ServeStatus.waiting:
-        statusLabel = "식사 준비중";
-        statusColor = const Color(0xFF1D4ED8);
-        statusBg = const Color(0xFFEAF2FF);
-        break;
-      case ServeStatus.closed:
-        statusLabel = "식사시간 종료";
-        statusColor = const Color(0xFF64748B);
-        statusBg = const Color(0xFFF1F5F9);
-        break;
-    }
-    final bool unavailable =
-        items.isEmpty ||
-        items.first.contains("없음") ||
-        items.first.contains("미운영");
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: const Color(0xFFF1F5F9)),
-        boxShadow: const [
-          BoxShadow(
-            blurRadius: 18,
-            offset: Offset(0, 10),
-            color: Color(0x14000000),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: statusBg,
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(22),
-              ),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: statusColor,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  statusLabel,
-                  style: TextStyle(
-                    color: statusColor,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const Spacer(),
-                Text(
-                  type.timeRange,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(20),
-            child: unavailable
-                ? const Center(
-                    child: Text(
-                      "운영하지 않는 시간입니다.",
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey,
-                      ),
-                    ),
-                  )
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        items.first,
-                        style: const TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      if (items.length > 1)
-                        Text(
-                          "+ ${items[1]}",
-                          style: const TextStyle(color: Colors.grey),
-                        ),
-                      const SizedBox(height: 20),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(15),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFF8FAFC),
-                          borderRadius: BorderRadius.circular(15),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              "전체 메뉴",
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey,
-                              ),
-                            ),
-                            const SizedBox(height: 5),
-                            ...items.map(
-                              (e) => Text(
-                                "• $e",
-                                style: const TextStyle(height: 1.5),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-          ),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(
-              border: Border(top: BorderSide(color: Color(0xFFF1F5F9))),
-            ),
-            child: Row(
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      "ENERGY",
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey,
-                      ),
-                    ),
-                    Text(
-                      "$kcal kcal",
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ],
-                ),
-                const Spacer(),
-                TextButton.icon(
-                  onPressed: onShare,
-                  icon: const Icon(Icons.share, size: 18),
-                  label: const Text("공유"),
-                  style: TextButton.styleFrom(foregroundColor: Colors.grey),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ErrorCard extends StatelessWidget {
-  final String message;
-  const _ErrorCard({required this.message});
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(16),
-    decoration: BoxDecoration(
-      color: const Color(0xFFFEF2F2),
-      borderRadius: BorderRadius.circular(16),
-      border: Border.all(color: const Color(0xFFFECACA)),
-    ),
-    child: Row(
-      children: [
-        const Icon(Icons.error_outline, color: Colors.red),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(message, style: const TextStyle(color: Colors.red)),
-        ),
-      ],
-    ),
-  );
-}
-
-class _BottomNavBar extends StatelessWidget {
-  final int currentIndex;
-  final ValueChanged<int> onTap;
-  const _BottomNavBar({required this.currentIndex, required this.onTap});
-  @override
-  Widget build(BuildContext context) {
-    final primary = Theme.of(context).colorScheme.primary;
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
-      ),
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _NavItem(
-            icon: Icons.restaurant,
-            label: "오늘",
-            active: currentIndex == 0,
-            onTap: () => onTap(0),
-            color: primary,
-          ),
-          _NavItem(
-            icon: Icons.calendar_today,
-            label: "월간",
-            active: currentIndex == 1,
-            onTap: () => onTap(1),
-            color: primary,
-          ),
-          _NavItem(
-            icon: Icons.settings,
-            label: "설정",
-            active: currentIndex == 2,
-            onTap: () => onTap(2),
-            color: primary,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _NavItem extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool active;
-  final VoidCallback onTap;
-  final Color color;
-  const _NavItem({
-    required this.icon,
-    required this.label,
-    required this.active,
-    required this.onTap,
-    required this.color,
-  });
-  @override
-  Widget build(BuildContext context) => InkWell(
-    onTap: onTap,
-    borderRadius: BorderRadius.circular(12),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: active ? color : Colors.grey),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-              color: active ? color : Colors.grey,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-class _Header extends StatelessWidget {
-  final bool alarmOn;
-  final VoidCallback onToggleAlarm;
-  final DateTime date;
-  final bool isToday;
-  final VoidCallback? onPrev;
-  final VoidCallback? onNext;
-  final MealSource source;
-  final ValueChanged<MealSource>? onSourceChanged;
-  final String? sourceHint;
-
-  const _Header({
+  const _CommonMealLayout({
     super.key,
-    required this.alarmOn,
-    required this.onToggleAlarm,
-    required this.date,
-    required this.isToday,
-    required this.onPrev,
-    required this.onNext,
-    required this.source,
-    required this.onSourceChanged,
-    required this.sourceHint,
+    required this.header,
+    required this.content,
   });
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final mainColor = theme.colorScheme.primary;
-    final tagText = source == MealSource.a ? "기숙사 식당" : "학생회관 식당";
-
-    const wd = ["일", "월", "화", "수", "목", "금", "토"];
-    final formatted =
-        "${date.year}. ${date.month}. ${date.day} (${wd[date.weekday % 7]})";
-    final iso =
-        "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
-
-    return Container(
-      decoration: BoxDecoration(
-        color: mainColor,
-        borderRadius: const BorderRadius.only(
-          bottomLeft: Radius.circular(32),
-          bottomRight: Radius.circular(32),
-        ),
-        boxShadow: const [
-          BoxShadow(
-            blurRadius: 18,
-            offset: Offset(0, 6),
-            color: Color(0x22000000),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.fromLTRB(18, 54, 18, 14),
-      child: Column(
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8F9FA),
+      body: Column(
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Wrap(
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        const Text(
-                          "KNUE 밥상",
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w800,
-                            fontSize: 20,
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(999),
-                            border: Border.all(
-                              color: Colors.white.withOpacity(0.3),
-                            ),
-                          ),
-                          child: Text(
-                            tagText,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.place,
-                          size: 14,
-                          color: Color(0xFFDBEAFE),
-                        ),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Text(
-                            source == MealSource.a ? "기숙사 식당" : "학생회관 식당",
-                            style: const TextStyle(
-                              color: Color(0xFFDBEAFE),
-                              fontSize: 12,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              InkWell(
-                onTap: onToggleAlarm,
-                borderRadius: BorderRadius.circular(999),
-                child: Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: alarmOn
-                        ? Colors.white
-                        : Colors.white.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Icon(
-                    alarmOn
-                        ? Icons.notifications_active
-                        : Icons.notifications_none,
-                    color: alarmOn ? mainColor : const Color(0xFFDBEAFE),
-                    size: 22,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.14),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: SegmentedButton<MealSource>(
-                    segments: const [
-                      ButtonSegment(value: MealSource.a, label: Text("기숙사 식당")),
-                      ButtonSegment(
-                        value: MealSource.b,
-                        label: Text("학생회관 식당"),
-                      ),
-                    ],
-                    selected: {source},
-                    onSelectionChanged: onSourceChanged == null
-                        ? null
-                        : (s) => onSourceChanged!(s.first),
-                    style: ButtonStyle(
-                      backgroundColor: MaterialStateProperty.resolveWith(
-                        (states) => states.contains(MaterialState.selected)
-                            ? Colors.white
-                            : Colors.white.withOpacity(0.12),
-                      ),
-                      foregroundColor: MaterialStateProperty.resolveWith(
-                        (states) => states.contains(MaterialState.selected)
-                            ? mainColor
-                            : const Color(0xFFDBEAFE),
-                      ),
-                      side: MaterialStateProperty.all(
-                        BorderSide(color: Colors.white.withOpacity(0.25)),
-                      ),
-                      textStyle: MaterialStateProperty.all(
-                        const TextStyle(fontWeight: FontWeight.w900),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (sourceHint != null) ...[
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                sourceHint!,
-                style: const TextStyle(
-                  color: Color(0xFFDBEAFE),
-                  fontSize: 11,
-                  height: 1.25,
-                ),
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.14),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            child: Row(
-              children: [
-                _HeaderNavBtn(icon: Icons.chevron_left, onTap: onPrev),
-                Expanded(
-                  child: Column(
-                    children: [
-                      Text(
-                        isToday ? "오늘" : iso,
-                        style: const TextStyle(
-                          color: Color(0xFFDBEAFE),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w300,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        formatted,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                _HeaderNavBtn(icon: Icons.chevron_right, onTap: onNext),
-              ],
+          header,
+          Expanded(
+            child: SingleChildScrollView(
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.only(bottom: 40),
+              child: content,
             ),
           ),
         ],
@@ -1802,118 +1805,135 @@ class _Header extends StatelessWidget {
   }
 }
 
-class _HeaderNavBtn extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback? onTap;
+// -----------------------------------------------------------------------------
+// Logic Helpers
+// -----------------------------------------------------------------------------
 
-  const _HeaderNavBtn({super.key, required this.icon, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      onPressed: onTap,
-      icon: Icon(icon, color: Colors.white, size: 28),
-      splashRadius: 22,
+Future<dynamic> _fetchMealApi(DateTime date, MealSource source) async {
+  late Uri uri;
+  if (source == MealSource.a) {
+    uri = Uri.parse(
+      "$kBaseUrl/meals-a?y=${date.year}&m=${date.month}&d=${date.day}",
     );
+  } else {
+    uri = Uri.parse("$kBaseUrl/meals-b?day=${_weekdayToDayParam(date)}");
+  }
+  final res = await http.get(uri).timeout(const Duration(seconds: 10));
+  if (res.statusCode != 200) throw Exception("서버 응답 오류 (${res.statusCode})");
+  return jsonDecode(utf8.decode(res.bodyBytes));
+}
+
+String _weekdayToDayParam(DateTime d) {
+  switch (d.weekday) {
+    case 1:
+      return "mon";
+    case 2:
+      return "tue";
+    case 3:
+      return "wed";
+    case 4:
+      return "thu";
+    case 5:
+      return "fri";
+    case 6:
+      return "sat";
+    default:
+      return "sun";
   }
 }
 
-class _PulsingDot extends StatefulWidget {
-  final Color color;
-  final bool pulsing;
+List<String> _asStringList(dynamic v) =>
+    (v is List) ? v.map((e) => e.toString()).toList() : [];
+bool _isSameDate(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
 
-  const _PulsingDot({super.key, required this.color, required this.pulsing});
+ServeStatus _statusFor(MealType type, DateTime now, DateTime targetDate) {
+  if (!_isSameDate(now, targetDate)) return ServeStatus.notToday;
 
-  @override
-  State<_PulsingDot> createState() => _PulsingDotState();
+  final range = type.timeRange.split("~").map((e) => e.trim()).toList();
+  final start = DateTime(
+    now.year,
+    now.month,
+    now.day,
+    int.parse(range[0].split(":")[0]),
+    int.parse(range[0].split(":")[1]),
+  );
+  final end = DateTime(
+    now.year,
+    now.month,
+    now.day,
+    int.parse(range[1].split(":")[0]),
+    int.parse(range[1].split(":")[1]),
+  );
+
+  if (now.isBefore(start)) return ServeStatus.waiting;
+  if (now.isAfter(end)) return ServeStatus.closed;
+  return ServeStatus.open;
 }
 
-class _PulsingDotState extends State<_PulsingDot>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c;
+void _toast(BuildContext context, String msg) {
+  ScaffoldMessenger.of(context).clearSnackBars();
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(msg),
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      margin: const EdgeInsets.all(20),
+    ),
+  );
+}
 
-  @override
-  void initState() {
-    super.initState();
-    _c = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    );
-    if (widget.pulsing) _c.repeat(reverse: true);
-  }
+Future<void> _shareCopy(
+  BuildContext context,
+  DateTime date,
+  MealSource src,
+  MealType type,
+  List<String>? items,
+) async {
+  final text =
+      "[KNUE ${src == MealSource.a ? '기숙사' : '학생회관'} ${date.month}/${date.day} ${type.label}]\n${(items == null || items.isEmpty) ? '메뉴 없음' : items.join(', ')}";
+  await Clipboard.setData(ClipboardData(text: text));
+  if (context.mounted) _toast(context, "메뉴가 클립보드에 복사되었습니다.");
+}
 
-  @override
-  void didUpdateWidget(covariant _PulsingDot oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.pulsing && !_c.isAnimating) {
-      _c.repeat(reverse: true);
-    } else if (!widget.pulsing && _c.isAnimating) {
-      _c.stop();
-      _c.value = 1;
+enum MealSource { a, b }
+
+enum MealType { breakfast, lunch, dinner }
+
+enum ServeStatus { open, waiting, closed, notToday }
+
+extension MealTypeX on MealType {
+  String get stdKey => toString().split('.').last;
+  String get label {
+    switch (this) {
+      case MealType.breakfast:
+        return "아침";
+      case MealType.lunch:
+        return "점심";
+      case MealType.dinner:
+        return "저녁";
     }
   }
 
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
+  IconData get icon {
+    switch (this) {
+      case MealType.breakfast:
+        return Icons.wb_twilight_rounded; // 해 뜸
+      case MealType.lunch:
+        return Icons.wb_sunny_rounded; // 해
+      case MealType.dinner:
+        return Icons.nights_stay_rounded; // 달
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _c,
-      builder: (_, __) {
-        final scale = widget.pulsing ? (0.85 + 0.25 * _c.value) : 1.0;
-        return Transform.scale(
-          scale: scale,
-          child: Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(
-              color: widget.color,
-              borderRadius: BorderRadius.circular(99),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-// main.dart 파일 맨 아래에 추가
-class WidgetService {
-  static const String androidWidgetName = 'MealWidget';
-
-  // [수정] 인자를 3개 받도록 변경
-  static Future<void> updateWidget(
-    String title,
-    String bf,
-    String lu,
-    String di,
-  ) async {
-    if (!Platform.isAndroid && !Platform.isIOS) return;
-
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      // SharedPreferences 저장 (백업용)
-      await prefs.setString('widget_title', title);
-      await prefs.setString('widget_breakfast', bf);
-      await prefs.setString('widget_lunch', lu);
-      await prefs.setString('widget_dinner', di);
-
-      // HomeWidget 저장
-      await HomeWidget.saveWidgetData<String>('widget_title', title);
-      await HomeWidget.saveWidgetData<String>('widget_breakfast', bf);
-      await HomeWidget.saveWidgetData<String>('widget_lunch', lu);
-      await HomeWidget.saveWidgetData<String>('widget_dinner', di);
-
-      await HomeWidget.updateWidget(
-        name: androidWidgetName,
-        androidName: androidWidgetName,
-      );
-    } catch (e) {
-      debugPrint("위젯 업데이트 오류: $e");
+  String get timeRange {
+    switch (this) {
+      case MealType.breakfast:
+        return "07:30 ~ 09:00";
+      case MealType.lunch:
+        return "11:30 ~ 13:30";
+      case MealType.dinner:
+        return "17:30 ~ 19:00";
     }
   }
 }
